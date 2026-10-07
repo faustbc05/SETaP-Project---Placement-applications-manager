@@ -1,20 +1,14 @@
-name: Ping Discord issue assignee
+name: Discord issue notifications
 
 on:
   issues:
-  issue_comment:
-    types: [created, edited, deleted]
+    types: [assigned, closed, reopened]
   workflow_dispatch:
     inputs:
       issue_number:
         description: Existing issue number to use for a notification test
         required: true
         type: string
-      resend_previous:
-        description: Resend the six original issue notifications (8-13)
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   issues: read
@@ -25,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Mention the assigned Discord member
+      - name: Send useful Discord issue notification
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_MAP_JSON: ${{ vars.DISCORD_USER_MAP_JSON }}
@@ -35,84 +29,120 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
 
-          async function main(replayNumber) {
+          function mappedId(users, login) {
+            if (!login || !Object.prototype.hasOwnProperty.call(users, login)) return '';
+            const id = String(users[login]);
+            return /^\d{17,20}$/.test(id) ? id : '';
+          }
+
+          async function main() {
             const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
             const test = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
             let issue = event.issue;
+
             if (test) {
-              const number = String(replayNumber || event.inputs.issue_number);
+              const number = String(event.inputs.issue_number);
               if (!/^[1-9]\d*$/.test(number)) throw new Error('Invalid issue number.');
-              const result = await fetch('https://api.github.com/repos/faustbc05/SETaP-Project---Placement-applications-manager/issues/' + number, {
-                headers: { Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json' },
-                redirect: 'error',
-                signal: AbortSignal.timeout(15000),
-              });
+              const result = await fetch(
+                'https://api.github.com/repos/faustbc05/SETaP-Project---Placement-applications-manager/issues/' + number,
+                {
+                  headers: {
+                    Authorization: 'Bearer ' + process.env.GH_TOKEN,
+                    Accept: 'application/vnd.github+json',
+                  },
+                  redirect: 'error',
+                  signal: AbortSignal.timeout(15000),
+                }
+              );
               if (!result.ok) throw new Error('Could not read the test issue.');
               issue = await result.json();
             }
+
             const number = String(issue?.number);
             if (!/^[1-9]\d*$/.test(number)) throw new Error('Invalid issue number.');
+
             const users = JSON.parse(process.env.DISCORD_USER_MAP_JSON || '{}');
-            const assignees = issue?.assignees || [];
-            const ids = [...new Set(assignees.map(user =>
-              Object.prototype.hasOwnProperty.call(users, user.login)
-                ? String(users[user.login]) : ''
-            ).filter(id => /^\d{17,20}$/.test(id)))];
-            if (!ids.length) {
-              console.log('No mapped current assignees; no Discord message sent.');
-              return;
-            }
-            if (ids.length > 50) throw new Error('Too many assignees.');
-            if (ids.length < assignees.length) {
-              console.log('Some assignees have no Discord mapping; they will not be mentioned.');
+            const repo = process.env.GITHUB_REPOSITORY;
+            if (repo !== 'faustbc05/SETaP-Project---Placement-applications-manager') {
+              throw new Error('Unexpected repository.');
             }
 
             const rawUrl = process.env.DISCORD_WEBHOOK_URL;
             if (!rawUrl) throw new Error('Add the DISCORD_WEBHOOK_URL repository secret.');
             const url = new URL(rawUrl);
-            if (url.protocol !== 'https:' || !['discord.com', 'discordapp.com'].includes(url.hostname)
-                || url.username || url.password || url.port
-                || !/^\/api(?:\/v\d+)?\/webhooks\/\d+\/[A-Za-z0-9_-]+(?:\/github)?\/?$/.test(url.pathname)) {
+            if (
+              url.protocol !== 'https:' ||
+              !['discord.com', 'discordapp.com'].includes(url.hostname) ||
+              url.username || url.password || url.port ||
+              !/^\/api(?:\/v\d+)?\/webhooks\/\d+\/[A-Za-z0-9_-]+(?:\/github)?\/?$/.test(url.pathname)
+            ) {
               throw new Error('The repository secret must contain a Discord webhook URL.');
             }
             url.pathname = url.pathname.replace(/\/github\/?$/, '').replace(/\/$/, '');
             url.search = '?wait=true';
             url.hash = '';
 
-            const repo = process.env.GITHUB_REPOSITORY;
-            if (repo !== 'faustbc05/SETaP-Project---Placement-applications-manager') {
-              throw new Error('Unexpected repository.');
-            }
             const link = 'https://github.com/' + repo + '/issues/' + number;
-            const actions = {
-              opened: 'opened', edited: 'edited', closed: 'closed', reopened: 'reopened',
-              assigned: 'assigned', unassigned: 'unassigned', labeled: 'labelled',
-              unlabeled: 'unlabelled', locked: 'locked', unlocked: 'unlocked',
-              milestoned: 'added to a milestone', demilestoned: 'removed from a milestone',
-              deleted: 'deleted', transferred: 'transferred', pinned: 'pinned', unpinned: 'unpinned',
-            };
-            const mentions = ids.map(id => '<@' + id + '>').join(' ');
             const title = String(issue.title || 'Issue #' + number)
-              .replace(/[\r\n]+/g, ' ').replace(/@/g, '@\u200b')
-              .replace(/[\\`*_{}\[\]()<>~|]/g, '\\$&').slice(0, 250);
-            let content;
-            if (test && !replayNumber) {
-              content = mentions + "'s issue #" + number + ': notification test. <' + link + '>';
-            } else if (process.env.GITHUB_EVENT_NAME === 'issue_comment') {
-              const action = {created: 'added to', edited: 'edited on', deleted: 'deleted from'}[event.action] || 'updated on';
-              content = mentions + "'s issue #" + number + ': a comment was ' + action + ' the issue. <' + link + '>';
-            } else if (replayNumber || event.action === 'assigned' || event.action === 'opened') {
-              content = mentions + (ids.length === 1 ? ' was' : ' were')
-                + ' assigned a new issue: ' + title + ' <' + link + '>';
+              .replace(/[\r\n]+/g, ' ')
+              .replace(/@/g, '@\u200b')
+              .slice(0, 250);
+
+            const assignees = issue?.assignees || [];
+            const currentIds = [...new Set(
+              assignees.map(user => mappedId(users, user.login)).filter(Boolean)
+            )];
+
+            let content = '';
+            let allowedUsers = [];
+            let embedTitle;
+            let description;
+
+            if (test) {
+              embedTitle = '🔔 Notification test';
+              description = '**#' + number + ' — ' + title + '**\n[View issue on GitHub](' + link + ')';
+            } else if (event.action === 'assigned') {
+              const login = event.assignee?.login;
+              const id = mappedId(users, login);
+              if (!id) {
+                console.log('New assignee has no Discord mapping; no message sent.');
+                return;
+              }
+              content = '<@' + id + '>';
+              allowedUsers = [id];
+              embedTitle = '📋 New task assigned';
+              description = '**#' + number + ' — ' + title + '**\nYou have been assigned this issue.\n[View issue on GitHub](' + link + ')';
+            } else if (event.action === 'closed') {
+              embedTitle = '✅ Issue completed';
+              const names = assignees.map(user => user.login).join(', ');
+              description = '**#' + number + ' — ' + title + '**'
+                + (names ? '\nAssigned to: ' + names : '')
+                + '\n[View issue on GitHub](' + link + ')';
+            } else if (event.action === 'reopened') {
+              if (!currentIds.length) {
+                console.log('Reopened issue has no mapped current assignees; no message sent.');
+                return;
+              }
+              content = currentIds.map(id => '<@' + id + '>').join(' ');
+              allowedUsers = currentIds;
+              embedTitle = '🔄 Issue reopened';
+              description = '**#' + number + ' — ' + title + '**\nThis issue needs attention again.\n[View issue on GitHub](' + link + ')';
             } else {
-              content = mentions + "'s issue #" + number + ' has been '
-                + (actions[event.action] || 'updated') + '. <' + link + '>';
+              console.log('Event does not require a Discord notification.');
+              return;
             }
+
             const payload = {
               content,
-              allowed_mentions: { parse: [], users: ids },
+              embeds: [{
+                title: embedTitle,
+                description,
+                url: link,
+              }],
+              allowed_mentions: { parse: [], users: allowedUsers },
               flags: 4,
             };
+
             const response = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -120,23 +150,13 @@ jobs:
               redirect: 'error',
               signal: AbortSignal.timeout(15000),
             });
+
             if (!response.ok) throw new Error('Discord returned HTTP ' + response.status + '.');
-            console.log('Discord assignee notification sent.');
+            console.log('Discord issue notification sent.');
           }
-          async function run() {
-            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-            if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && event.inputs.resend_previous === 'true') {
-              for (const number of [8, 9, 10, 11, 12, 13]) {
-                await main(number);
-                await new Promise(resolve => setTimeout(resolve, 750));
-              }
-            } else {
-              await main();
-            }
-          }
-          run().catch(() => {
-            console.error('Discord notification failed. Check the webhook secret and member mapping.');
+
+          main().catch(error => {
+            console.error('Discord notification failed:', error.message);
             process.exitCode = 1;
           });
           NODE
-
