@@ -86,14 +86,27 @@ jobs:
               milestoned: 'added to a milestone', demilestoned: 'removed from a milestone',
               deleted: 'deleted', transferred: 'transferred', pinned: 'pinned', unpinned: 'unpinned',
             };
-            const action = test ? 'Notification test' :
-              process.env.GITHUB_EVENT_NAME === 'issue_comment'
-                ? 'Comment ' + ({created: 'added', edited: 'edited', deleted: 'deleted'}[event.action] || 'updated')
-                : 'Issue ' + (actions[event.action] || 'updated');
+            const mentions = ids.map(id => '<@' + id + '>').join(' ');
+            const title = String(issue.title || 'Issue #' + number)
+              .replace(/[\r\n]+/g, ' ').replace(/@/g, '@\u200b')
+              .replace(/[\\`*_{}\[\]()<>~|]/g, '\\$&').slice(0, 250);
+            let content;
+            if (test) {
+              content = mentions + "'s issue #" + number + ': notification test. <' + link + '>';
+            } else if (process.env.GITHUB_EVENT_NAME === 'issue_comment') {
+              const action = {created: 'added to', edited: 'edited on', deleted: 'deleted from'}[event.action] || 'updated on';
+              content = mentions + "'s issue #" + number + ': a comment was ' + action + ' the issue. <' + link + '>';
+            } else if (event.action === 'assigned' || event.action === 'opened') {
+              content = mentions + (ids.length === 1 ? ' was' : ' were')
+                + ' assigned a new issue: ' + title + ' <' + link + '>';
+            } else {
+              content = mentions + "'s issue #" + number + ' has been '
+                + (actions[event.action] || 'updated') + '. <' + link + '>';
+            }
             const payload = {
-              content: ids.map(id => '<@' + id + '>').join(' ') + ' ' + action
-                + ': [issue #' + number + '](' + link + ').',
+              content,
               allowed_mentions: { parse: [], users: ids },
+              flags: 4,
             };
             const response = await fetch(url, {
               method: 'POST',
@@ -110,3 +123,4 @@ jobs:
             process.exitCode = 1;
           });
           NODE
+
