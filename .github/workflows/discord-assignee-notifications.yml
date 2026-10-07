@@ -10,6 +10,11 @@ on:
         description: Existing issue number to use for a notification test
         required: true
         type: string
+      resend_previous:
+        description: Resend the six original issue notifications (8-13)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   issues: read
@@ -30,12 +35,12 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
 
-          async function main() {
+          async function main(replayNumber) {
             const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
             const test = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch';
             let issue = event.issue;
             if (test) {
-              const number = String(event.inputs.issue_number);
+              const number = String(replayNumber || event.inputs.issue_number);
               if (!/^[1-9]\d*$/.test(number)) throw new Error('Invalid issue number.');
               const result = await fetch('https://api.github.com/repos/faustbc05/SETaP-Project---Placement-applications-manager/issues/' + number, {
                 headers: { Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json' },
@@ -91,12 +96,12 @@ jobs:
               .replace(/[\r\n]+/g, ' ').replace(/@/g, '@\u200b')
               .replace(/[\\`*_{}\[\]()<>~|]/g, '\\$&').slice(0, 250);
             let content;
-            if (test) {
+            if (test && !replayNumber) {
               content = mentions + "'s issue #" + number + ': notification test. <' + link + '>';
             } else if (process.env.GITHUB_EVENT_NAME === 'issue_comment') {
               const action = {created: 'added to', edited: 'edited on', deleted: 'deleted from'}[event.action] || 'updated on';
               content = mentions + "'s issue #" + number + ': a comment was ' + action + ' the issue. <' + link + '>';
-            } else if (event.action === 'assigned' || event.action === 'opened') {
+            } else if (replayNumber || event.action === 'assigned' || event.action === 'opened') {
               content = mentions + (ids.length === 1 ? ' was' : ' were')
                 + ' assigned a new issue: ' + title + ' <' + link + '>';
             } else {
@@ -118,7 +123,18 @@ jobs:
             if (!response.ok) throw new Error('Discord returned HTTP ' + response.status + '.');
             console.log('Discord assignee notification sent.');
           }
-          main().catch(() => {
+          async function run() {
+            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+            if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && event.inputs.resend_previous === 'true') {
+              for (const number of [8, 9, 10, 11, 12, 13]) {
+                await main(number);
+                await new Promise(resolve => setTimeout(resolve, 750));
+              }
+            } else {
+              await main();
+            }
+          }
+          run().catch(() => {
             console.error('Discord notification failed. Check the webhook secret and member mapping.');
             process.exitCode = 1;
           });
