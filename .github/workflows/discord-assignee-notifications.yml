@@ -140,7 +140,7 @@ jobs:
                 url: link,
               }],
               allowed_mentions: { parse: [], users: allowedUsers },
-              flags: 4,
+              flags: 0,
             };
 
             const response = await fetch(url, {
