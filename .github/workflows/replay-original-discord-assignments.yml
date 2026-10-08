@@ -1,4 +1,4 @@
-name: Replay original Discord assignments (no pings)
+name: Replay original Discord assignments (real pings)
 
 on:
   push:
@@ -16,15 +16,16 @@ jobs:
   replay:
     # This one-off commit is the only trigger. Reruns are intentionally refused.
     if: >-
-      github.event.head_commit.message == 'Replay original Discord assignments 8-13 without pings (2026-10-08)' &&
+      github.event.head_commit.message == 'Replay original Discord assignments 8-13 with real assignee pings (2026-10-08)' &&
       github.run_attempt == 1 &&
       vars.DISCORD_ASSIGNEE_NOTIFICATIONS_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Replay and verify six assignment embeds without pings
+      - name: Replay and verify six normal assignment notifications
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_MAP_JSON: ${{ vars.DISCORD_USER_MAP_JSON }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -83,6 +84,7 @@ jobs:
               }
             ];
             const headers = { Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json' };
+            const users = JSON.parse(process.env.DISCORD_USER_MAP_JSON || '{}');
             const prepared = [];
             // Validate all six issues before sending any messages.
             for (const item of expected) {
@@ -97,18 +99,20 @@ jobs:
               }
               const link = 'https://github.com/' + repo + '/issues/' + item.number;
               const title = item.title.replace(/[\r\n]+/g, ' ').replace(/@/g, '@\u200b').slice(0, 250);
+              const id = Object.prototype.hasOwnProperty.call(users, item.assignee) ? String(users[item.assignee]) : '';
+              if (!/^\d{17,20}$/.test(id)) throw new Error('Missing Discord mapping for ' + item.assignee);
               prepared.push({ number: item.number, payload: {
-                content: '',
+                content: '<@' + id + '>',
                 embeds: [{
                   title: '📋 New task assigned',
-                  description: '**#' + item.number + ' — ' + title + '**\nYou have been assigned this issue.\nAssigned to: ' + item.assignee + '\n[View issue on GitHub](' + link + ')',
+                  description: '**#' + item.number + ' — ' + title + '**\nYou have been assigned this issue.\n[View issue on GitHub](' + link + ')',
                   url: link,
                 }],
-                allowed_mentions: { parse: [], users: [], roles: [], replied_user: false },
-                flags: 4096, // SUPPRESS_NOTIFICATIONS; keep the assignment embed visible
+                allowed_mentions: { parse: [], users: [id] },
+                flags: 0, // Normal assignment: visible embed and notifications enabled
               }});
             }
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Assignment replay (no pings)\n\n| Issue | Discord message ID | Verified |\n| --- | --- | --- |\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Assignment replay (real assignee pings)\n\n| Issue | Discord message ID | Verified |\n| --- | --- | --- |\n');
             for (const { number, payload } of prepared) {
               // Never automatically retry POST: an ambiguous failure could duplicate a message.
               const response = await fetch(url, {
@@ -126,17 +130,18 @@ jobs:
               const checked = await fetch(verifyUrl, { redirect: 'error', signal: AbortSignal.timeout(15000) });
               if (!checked.ok) throw new Error('Could not verify message for #' + number + ': HTTP ' + checked.status);
               const saved = await checked.json();
-              if (saved.id !== message.id || saved.content !== '' || saved.mention_everyone ||
-                  !Array.isArray(saved.mentions) || saved.mentions.length ||
+              if (saved.id !== message.id || saved.content !== payload.content || saved.mention_everyone ||
+                  !Array.isArray(saved.mentions) || saved.mentions.length !== 1 ||
+                  saved.mentions[0].id !== payload.allowed_mentions.users[0] ||
                   (saved.mention_roles || []).length ||
-                  !(saved.flags & 4096) || saved.embeds?.length !== 1 ||
+                  (saved.flags & 4100) || saved.embeds?.length !== 1 ||
                   saved.embeds[0].title !== payload.embeds[0].title ||
                   saved.embeds[0].description !== payload.embeds[0].description ||
                   saved.embeds[0].url !== payload.embeds[0].url) {
                 throw new Error('Discord verification mismatch for #' + number + '. Do not rerun blindly.');
               }
-              console.log('Issue #' + number + ': verified embed, empty content, zero mentions, notifications suppressed.');
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '| #' + number + ' | ' + message.id + ' | Verified: zero mentions, notifications suppressed |\n');
+              console.log('Issue #' + number + ': verified assignment embed, correct assignee mention, notifications enabled.');
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '| #' + number + ' | ' + message.id + ' | Verified: correct assignee mention, notifications enabled |\n');
             }
           }
           main().catch(error => {
