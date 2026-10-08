@@ -1,0 +1,146 @@
+name: Replay original Discord assignments (no pings)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/replay-original-discord-assignments.yml]
+
+permissions:
+  issues: read
+
+concurrency:
+  group: replay-original-discord-assignments-8-13
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    # This one-off commit is the only trigger. Reruns are intentionally refused.
+    if: >-
+      github.event.head_commit.message == 'Replay original Discord assignments 8-13 without pings (2026-10-08)' &&
+      github.run_attempt == 1 &&
+      vars.DISCORD_ASSIGNEE_NOTIFICATIONS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Replay and verify six assignment embeds without pings
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          
+          async function main() {
+            const repo = process.env.GITHUB_REPOSITORY;
+            if (repo !== 'faustbc05/SETaP-Project---Placement-applications-manager') throw new Error('Unexpected repository.');
+            const rawUrl = process.env.DISCORD_WEBHOOK_URL;
+            if (!rawUrl) throw new Error('Add the DISCORD_WEBHOOK_URL repository secret.');
+            const url = new URL(rawUrl);
+            if (
+              url.protocol !== 'https:' ||
+              !['discord.com', 'discordapp.com'].includes(url.hostname) ||
+              url.username || url.password || url.port ||
+              !/^\/api(?:\/v\d+)?\/webhooks\/\d+\/[A-Za-z0-9_-]+(?:\/github)?\/?$/.test(url.pathname)
+            ) {
+              throw new Error('The repository secret must contain a Discord webhook URL.');
+            }
+            url.pathname = url.pathname.replace(/\/github\/?$/, '').replace(/\/$/, '');
+            url.search = '?wait=true';
+            url.hash = '';
+          
+          
+            const expected = [
+              {
+                "number": 8,
+                "title": "Prepare student and staff interview questions",
+                "assignee": "IoannisMich"
+              },
+              {
+                "number": 9,
+                "title": "Plan a focus group / design workshop",
+                "assignee": "Leoluis0710"
+              },
+              {
+                "number": 10,
+                "title": "Create the requirements tracking table",
+                "assignee": "up2306853-del"
+              },
+              {
+                "number": 11,
+                "title": "Create simple mock-ups for user research",
+                "assignee": "Adam-Wood2"
+              },
+              {
+                "number": 12,
+                "title": "Plan how we will gather requirements",
+                "assignee": "iamkellins"
+              },
+              {
+                "number": 13,
+                "title": "Organise this week's requirements work",
+                "assignee": "faustbc05"
+              }
+            ];
+            const headers = { Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json' };
+            const prepared = [];
+            // Validate all six issues before sending any messages.
+            for (const item of expected) {
+              const result = await fetch('https://api.github.com/repos/' + repo + '/issues/' + item.number, {
+                headers, redirect: 'error', signal: AbortSignal.timeout(15000),
+              });
+              if (!result.ok) throw new Error('Could not read issue #' + item.number + ': HTTP ' + result.status);
+              const issue = await result.json();
+              if (issue.pull_request || issue.number !== item.number || issue.title !== item.title ||
+                  issue.assignees.length !== 1 || issue.assignees[0].login !== item.assignee) {
+                throw new Error('Issue #' + item.number + ' changed; inspect before replaying.');
+              }
+              const link = 'https://github.com/' + repo + '/issues/' + item.number;
+              const title = item.title.replace(/[\r\n]+/g, ' ').replace(/@/g, '@\u200b').slice(0, 250);
+              prepared.push({ number: item.number, payload: {
+                content: '',
+                embeds: [{
+                  title: '📋 New task assigned',
+                  description: '**#' + item.number + ' — ' + title + '**\nYou have been assigned this issue.\nAssigned to: ' + item.assignee + '\n[View issue on GitHub](' + link + ')',
+                  url: link,
+                }],
+                allowed_mentions: { parse: [], users: [], roles: [], replied_user: false },
+                flags: 4096, // SUPPRESS_NOTIFICATIONS; keep the assignment embed visible
+              }});
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Assignment replay (no pings)\n\n| Issue | Discord message ID | Verified |\n| --- | --- | --- |\n');
+            for (const { number, payload } of prepared) {
+              // Never automatically retry POST: an ambiguous failure could duplicate a message.
+              const response = await fetch(url, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(15000),
+              });
+              if (!response.ok) throw new Error('Discord POST for #' + number + ': HTTP ' + response.status);
+              const message = await response.json();
+              if (!/^\d{17,20}$/.test(String(message.id))) throw new Error('Discord returned no valid message ID for #' + number);
+              console.log('Issue #' + number + ': created Discord message ' + message.id);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '| #' + number + ' | ' + message.id + ' | Created; verification pending |\n');
+              const verifyUrl = new URL(url);
+              verifyUrl.pathname += '/messages/' + message.id;
+              verifyUrl.search = '';
+              const checked = await fetch(verifyUrl, { redirect: 'error', signal: AbortSignal.timeout(15000) });
+              if (!checked.ok) throw new Error('Could not verify message for #' + number + ': HTTP ' + checked.status);
+              const saved = await checked.json();
+              if (saved.id !== message.id || saved.content !== '' || saved.mention_everyone ||
+                  !Array.isArray(saved.mentions) || saved.mentions.length ||
+                  (saved.mention_roles || []).length ||
+                  !(saved.flags & 4096) || saved.embeds?.length !== 1 ||
+                  saved.embeds[0].title !== payload.embeds[0].title ||
+                  saved.embeds[0].description !== payload.embeds[0].description ||
+                  saved.embeds[0].url !== payload.embeds[0].url) {
+                throw new Error('Discord verification mismatch for #' + number + '. Do not rerun blindly.');
+              }
+              console.log('Issue #' + number + ': verified embed, empty content, zero mentions, notifications suppressed.');
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '| #' + number + ' | ' + message.id + ' | Verified: zero mentions, notifications suppressed |\n');
+            }
+          }
+          main().catch(error => {
+            console.error('Assignment replay failed:', error.message);
+            process.exitCode = 1;
+          });
+          NODE
