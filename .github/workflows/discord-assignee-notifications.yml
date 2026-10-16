@@ -3,6 +3,8 @@ name: Discord issue notifications
 on:
   issues:
     types: [assigned, closed, reopened]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       issue_number:
@@ -112,6 +114,36 @@ jobs:
               allowedUsers = [id];
               embedTitle = '📋 New task assigned';
               description = '**#' + number + ' — ' + title + '**\nYou have been assigned this issue.\n[View issue on GitHub](' + link + ')';
+            } else if (process.env.GITHUB_EVENT_NAME === 'issue_comment' && event.action === 'created') {
+              if (issue.pull_request) {
+                console.log('Comment belongs to a pull request, not an issue; no message sent.');
+                return;
+              }
+              const commenter = event.comment?.user?.login;
+              if (!commenter) {
+                console.log('Comment has no author; no message sent.');
+                return;
+              }
+              const recipientIds = [...new Set(
+                assignees
+                  .filter(user => user.login?.toLowerCase() !== commenter.toLowerCase())
+                  .map(user => mappedId(users, user.login))
+                  .filter(Boolean)
+              )];
+              if (!recipientIds.length) {
+                console.log('No other mapped assignees to notify; no message sent.');
+                return;
+              }
+              const commentId = String(event.comment?.id || '');
+              const commentLink = /^\d+$/.test(commentId)
+                ? link + '#issuecomment-' + commentId
+                : link;
+              content = recipientIds.map(id => '<@' + id + '>').join(' ');
+              allowedUsers = recipientIds;
+              embedTitle = '💬 New comment on your assigned issue';
+              description = '**#' + number + ' — ' + title + '**\n'
+                + '**' + commenter.replace(/@/g, '@\u200b') + '** left a new comment on this issue.\n'
+                + '[View comment on GitHub](' + commentLink + ')';
             } else if (event.action === 'closed') {
               embedTitle = '✅ Issue completed';
               const names = assignees.map(user => user.login).join(', ');
